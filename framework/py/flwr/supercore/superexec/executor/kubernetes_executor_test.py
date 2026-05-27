@@ -67,6 +67,13 @@ def _executor_config(**overrides: Any) -> KubernetesExecutorConfig:
     return KubernetesExecutorConfig(**base)
 
 
+def _pod(phase: str, deletion_timestamp: str | None = None) -> dict[str, Any]:
+    metadata = {}
+    if deletion_timestamp is not None:
+        metadata["deletionTimestamp"] = deletion_timestamp
+    return {"metadata": metadata, "status": {"phase": phase}}
+
+
 def _contains_value(value: Any, needle: str) -> bool:
     """Return true if a nested Kubernetes object contains a value."""
     if value == needle:
@@ -313,6 +320,110 @@ def test_config_rejects_non_string_node_selector_entries() -> None:
     """Test node selector entries must be strings."""
     with pytest.raises(ValueError, match="Node selector entries must be strings"):
         _executor_config(node_selector={"flower.ai/gpu": True})
+
+
+def test_config_rejects_capacity_budget_without_resource_pool() -> None:
+    """Test capacity gating requires an explicit resource pool."""
+    with pytest.raises(ValueError, match="Resource pool must be configured"):
+        _executor_config(active_pod_budget=10)
+
+
+def test_config_rejects_invalid_capacity_poll_interval() -> None:
+    """Test capacity poll interval must be positive."""
+    with pytest.raises(ValueError, match="Capacity poll interval must be positive"):
+        _executor_config(capacity_poll_interval=0)
+
+
+def test_wait_for_capacity_returns_below_budget_without_sleeping() -> None:
+    """Test capacity wait returns immediately when the active Pod count fits."""
+    client = Mock()
+    client.list_namespaced_pod.return_value = {"items": [_pod("Running")]}
+    sleep = Mock()
+    config = _executor_config(
+        labels={"flower.ai/team": "platform"},
+        resource_pool="gpu-pool",
+        active_pod_budget=2,
+        capacity_poll_interval=3.0,
+        sleep=sleep,
+    )
+
+    KubernetesExecutor(client=client, config=config).wait_for_capacity()
+
+    client.list_namespaced_pod.assert_called_once_with(
+        "flower-system",
+        label_selector=(
+            "app.kubernetes.io/component=taskexecutor,"
+            "app.kubernetes.io/name=flower,"
+            "flower.ai/resource-pool=gpu-pool,"
+            "flower.ai/team=platform"
+        ),
+    )
+    sleep.assert_not_called()
+
+
+def test_wait_for_capacity_sleeps_and_polls_again_at_budget() -> None:
+    """Test capacity wait sleeps when the active Pod count reaches the budget."""
+    client = Mock()
+    client.list_namespaced_pod.side_effect = [
+        {"items": [_pod("Pending")]},
+        {"items": []},
+    ]
+    sleep = Mock()
+    config = _executor_config(
+        resource_pool="gpu-pool",
+        active_pod_budget=1,
+        capacity_poll_interval=3.0,
+        sleep=sleep,
+    )
+
+    KubernetesExecutor(client=client, config=config).wait_for_capacity()
+
+    assert client.list_namespaced_pod.call_count == 2
+    sleep.assert_called_once_with(3.0)
+
+
+def test_wait_for_capacity_counts_pending_running_and_terminating_pods() -> None:
+    """Test active Pod counting includes phase-active and terminating Pods."""
+    client = Mock()
+    client.list_namespaced_pod.side_effect = [
+        {
+            "items": [
+                _pod("Pending"),
+                _pod("Running"),
+                _pod("Succeeded", deletion_timestamp="2026-05-26T18:30:00Z"),
+                _pod("Failed", deletion_timestamp="2026-05-26T18:31:00Z"),
+            ]
+        },
+        {"items": []},
+    ]
+    sleep = Mock()
+    config = _executor_config(
+        resource_pool="gpu-pool",
+        active_pod_budget=4,
+        sleep=sleep,
+    )
+
+    KubernetesExecutor(client=client, config=config).wait_for_capacity()
+
+    sleep.assert_called_once_with(1.0)
+
+
+def test_wait_for_capacity_ignores_terminal_pods_not_terminating() -> None:
+    """Test Succeeded and Failed Pods do not count when they are not terminating."""
+    client = Mock()
+    client.list_namespaced_pod.return_value = {
+        "items": [_pod("Succeeded"), _pod("Failed")]
+    }
+    sleep = Mock()
+    config = _executor_config(
+        resource_pool="gpu-pool",
+        active_pod_budget=1,
+        sleep=sleep,
+    )
+
+    KubernetesExecutor(client=client, config=config).wait_for_capacity()
+
+    sleep.assert_not_called()
 
 
 def test_launch_submits_secret_before_pod_and_returns_accepted() -> None:
