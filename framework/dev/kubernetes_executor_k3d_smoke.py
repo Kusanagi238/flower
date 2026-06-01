@@ -96,6 +96,26 @@ class CoreV1ApiAdapter:
             namespace=namespace, label_selector=label_selector
         )
 
+    def list_namespaced_secret(self, namespace: str, label_selector: str) -> object:
+        """List Kubernetes Secrets in the selected namespace."""
+        return self._api.list_namespaced_secret(
+            namespace=namespace, label_selector=label_selector
+        )
+
+    def delete_namespaced_pod(
+        self, name: str, namespace: str, grace_period_seconds: int = 0
+    ) -> object:
+        """Delete a Kubernetes Pod in the selected namespace."""
+        return self._api.delete_namespaced_pod(
+            name=name,
+            namespace=namespace,
+            grace_period_seconds=grace_period_seconds,
+        )
+
+    def delete_namespaced_secret(self, name: str, namespace: str) -> object:
+        """Delete a Kubernetes Secret in the selected namespace."""
+        return self._api.delete_namespaced_secret(name=name, namespace=namespace)
+
 
 def parse_args(argv: Sequence[str] | None = None) -> SmokeConfig:
     """Parse CLI args and environment defaults for the smoke harness."""
@@ -498,7 +518,7 @@ def _check_local_tools() -> None:
 def _load_kubernetes() -> tuple[Any, Any]:
     """Load the optional Kubernetes Python client lazily."""
     try:
-        from kubernetes import client, config  # type: ignore[import-not-found]
+        from kubernetes import client, config
     except ImportError as exc:
         raise SkipSmoke(
             "Optional Python package 'kubernetes' is missing. Run through "
